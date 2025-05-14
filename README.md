@@ -209,148 +209,64 @@ This is where the power of versioned schemas truly shines.
     ```
     *(To use this in Confluence, paste the Mermaid code into a "Mermaid Diagram" macro.)*
 
-## 4. React Proof of Concept (Summary)
+## 4. Plan Data Migration for Editing (User-Initiated)
 
-A proof-of-concept (PoC) React application was developed to validate the feasibility and effectiveness of the schema-driven dynamic UI rendering approach.
+While viewing historical plans uses their original schemas, editing a plan should always occur against the **latest schema version** to ensure data consistency, application of current business rules, and utilization of new features. If a user attempts to edit an older plan, a migration process is initiated.
 
-* **Core Components:**
-    * `App.js`: The main application component, responsible for managing the overall state, including the current schema, data blob, and the selected rendering mode.
-    * `SchemaField.js` (or `SchemaRenderer.js`): A recursive React component designed to:
-        * Accept a schema node, the corresponding data node from the blob, the full data blob (for evaluating global conditions), and the current rendering mode as props.
-        * Interpret schema properties such as `type`, `title`, `description`, `x-ui-order` (for field ordering), `element` (for specific UI widget hints like rendering a string as a checkbox representation), and `x-ui-visible-if` (for conditional visibility).
-        * Handle nested object structures by recursively calling itself for sub-properties.
-* **Key Functionality Demonstrated:**
-    * **Two Rendering Modes:**
-        1.  **Simple Mode:** Renders all UI elements defined in the schema, displaying "[N/A]" for any data not present in the blob. Conditional visibility rules are ignored.
-        2.  **Conditional Mode:** Actively evaluates `x-ui-visible-if` rules defined within the schema against the provided data blob. UI elements (fields or entire sections) are only rendered if their visibility conditions are met.
-    * **Data Access & Evaluation:**
-        * Implemented a `getNestedValue(data, path)` helper function to safely retrieve data from potentially deeply nested paths within the data blob, as specified in condition rules.
-        * Implemented an `evaluateCondition(condition, fullData)` helper function to parse and evaluate the logic defined in `x-ui-visible-if` objects. This included handling different operators like `hasValue`, `isNotEmpty`, etc.
-    * **Flexible Data Display:** The renderer demonstrated handling for different data types specified in the schema (e.g., displaying actual booleans as "Yes"/"No") and also adapted to cases where string data was used to represent boolean-like states (e.g., for checkboxes where a non-empty string means "checked").
-* **Learnings & Outcomes:**
-    * The PoC successfully demonstrated that a generic rendering engine can accurately display complex, versioned data structures based on external schema definitions.
-    * Conditional visibility logic driven by schema hints is feasible and powerful.
-    * The importance of robust helper functions for data traversal and condition evaluation was highlighted.
-    * The PoC provides a solid foundation for building a production-ready rendering engine.
-    * *(Consider linking to the PoC code repository or a more detailed PoC write-up if available.)*
+### 4.1. Migration Trigger and User Experience
+* **Version Check:** When a user opens a plan for editing, the frontend application compares the plan's current `schemaVersionId` with the system's latest schema version.
+* **Migration Prompt:** If the versions do not match, the user is notified that the plan was created under an older structure and needs to be migrated to the latest version before editing can proceed. They are typically asked to confirm this one-time migration.
+* **Benefits of Migration:**
+    * Ensures all editable plans conform to the current, single source of truth (the latest schema).
+    * Allows new features and validation rules to apply consistently.
+    * Simplifies the editing UI, as it only needs to target the latest schema.
 
-## 5. Benefits of this Approach
+### 4.2. Backend Migration Process
+Upon user confirmation, the frontend calls a dedicated backend endpoint (e.g., `/migrate-plan`) with the plan data, its current (`fromVersion`) schema identifier, and the target (`toVersion`, usually "latest") schema identifier.
 
-Adopting a schema-driven dynamic UI with versioned schemas offers significant advantages:
+The backend migration service then performs the following steps:
+1.  **Load Schemas:** Fetches the JSON schema definitions for both the `fromVersion` and `toVersion`.
+2.  **Recursive Data Transformation:** Iterates through the properties defined in the `toVersion` schema:
+    * **Existing Fields:** If a field from the `toVersion` schema also exists in the `fromVersion` schema (and thus in the input `planRequest` data):
+        * If the field is a simple type, its value is copied.
+        * If the field is an object, the migration logic is applied recursively to its properties.
+        * (Future Enhancement: Type coercion or specific transformation logic could be added here if field types change between versions, e.g., string to number, or restructuring an object.)
+    * **New Fields:** If a field is present in the `toVersion` schema but not in the `fromVersion` schema (i.e., it's a new field), it is added to the migrated plan data, typically with a `null` value or a defined default from the `toVersion` schema.
+    * **Removed Fields:** Fields present in the `fromVersion` schema (and the input data) but *not* in the `toVersion` schema are effectively dropped during the migration, as the process builds the new data structure based on the `toVersion` schema. (Careful consideration is needed for data loss; important data from removed fields might need to be mapped to new fields or archived).
+3.  **Update Schema Version:** The `schemaVersionId` (or equivalent field like `planCreationVersion`) within the plan data is updated to reflect the `toVersion`.
+4.  **Return Migrated Data:** The backend returns the fully migrated plan data (now conforming to the `toVersion` schema) to the frontend.
+5.  **Save Migrated Data:** The frontend, upon receiving the successfully migrated data, typically prompts the user to save these changes, or the save might be implicit if the migration is a prerequisite to editing. The plan is then saved in the database with its new structure and updated `schemaVersionId`.
 
-* **Accurate Historical Representation:** Ensures users see an accurate reflection of data as it was structured and intended at any point in time.
-* **Improved Data Integrity:** By validating new data against a clear schema contract, data quality is enhanced.
-* **Reduced Frontend Complexity:** Eliminates the need to write and maintain version-specific UI rendering code. A single engine handles all versions.
-* **Maintainability & Scalability:** Easier to manage changes. When a new data version is introduced, a new schema is created/updated, but the rendering engine logic remains largely the same.
-* **Developer Productivity:**
-    * Frontend developers can focus on building the generic rendering engine and reusable UI components.
-    * Backend developers have clear contracts (schemas) for data validation.
-    * Clear separation of concerns.
-* **Centralized Business Rules (for Presentation):** Schemas act as a central repository for how data should be presented, including labels, descriptions, and visibility rules.
-* **Adaptability:** The system can more easily adapt to future changes in data structure and UI requirements.
+### 4.3. Migration Flow Diagram
+```mermaid
+sequenceDiagram
+    participant User
+    participant FrontendApp as Frontend App
+    participant BackendAPI as Backend API
+    participant Database
+    participant SchemaRegistry as Schema Registry
 
-## 6. Considerations and Trade-offs
-
-While powerful, this approach has considerations:
-
-* **Initial Setup Effort:**
-    * Designing and implementing the dynamic UI rendering engine requires a significant upfront investment.
-    * Establishing a robust schema versioning and management process takes time and discipline.
-* **Performance of Dynamic Rendering:** For extremely large and complex schemas or data blobs, the dynamic rendering process might introduce performance overhead. Careful optimization (e.g., memoization, virtualized lists for large arrays) may be needed.
-* **Complexity of Schema Management:** As the number of schema versions grows, managing them effectively (storage, retrieval, diffing, deprecation) becomes crucial. A schema registry can be beneficial.
-* **Learning Curve:** The team needs to become proficient in JSON Schema and the conventions used for UI hints and conditional logic.
-* **Tooling:** Good tooling for creating, validating, and managing JSON schemas is important.
-* **Debugging:** Debugging issues that span across the data, the schema, and the rendering engine can sometimes be more complex than with statically defined UIs.
-
-## 7. Migration Strategy for Existing Data (If Applicable)
-
-If you have existing plan data that was not created under this versioned schema approach, a migration strategy will be needed:
-
-1.  **Analyze Existing Data Structures:** Understand the different historical "shapes" of your existing plan data.
-2.  **Create Historical Schemas:** For each distinct historical data structure identified, create a corresponding JSON schema (e.g., `plan-schema-v0.1.0.json`, `plan-schema-v0.2.0.json`). These schemas should accurately reflect the fields and types present at those times.
-3.  **Determine Schema Version for Existing Records:**
-    * This is the most challenging part. You might need to use heuristics:
-        * **Creation/Update Timestamps:** If records have reliable timestamps, you might be able to map date ranges to specific schema versions (assuming you know when schema changes roughly occurred).
-        * **Presence/Absence of Key Fields:** Write scripts to inspect existing data records for the presence or absence of certain "marker" fields that indicate which historical structure they belong to.
-        * **Default to a Base Schema:** For very old or indeterminate records, you might assign them to a very basic historical schema.
-4.  **Update Data Records:** Add the determined `schemaVersionId` to each existing plan data record. This might involve a one-time batch update to your database.
-5.  **Iterative Refinement:** This process may be iterative. As you analyze data and build historical schemas, you might refine your understanding and schema definitions.
-
-## 8. Team Roles & Responsibilities (Suggested)
-
-Defining roles can help ensure the success of this system:
-
-* **Schema Architects/Stewards (e.g., Senior Developers, Tech Leads):**
-    * Responsible for designing, versioning, and maintaining the JSON schemas.
-    * Define and document conventions for custom UI hints (e.g., `x-ui-visible-if`).
-    * Oversee the schema registry or storage solution.
-* **Frontend Development Team:**
-    * Develops and maintains the dynamic UI rendering engine.
-    * Implements generic UI components that can be configured by the schema.
-    * Ensures the engine correctly interprets schema directives.
-* **Backend Development Team:**
-    * Implements the flexible storage and retrieval of versioned plan data.
-    * Ensures the correct historical schema is fetched and provided to the frontend alongside the data.
-    * Develops and maintains server-side validation logic for new/updated data (both schema-based and complex business rule validation in code).
-* **Product Management/Business Analysts:**
-    * Define the data requirements and conditional logic for different plan versions.
-    * Work with Schema Architects to translate these requirements into schema definitions and UI hints.
-* **QA/Testing Team:**
-    * Develop test cases for various schema versions and data scenarios.
-    * Verify that historical data is rendered correctly according to its schema.
-    * Test conditional visibility and requirement logic.
-
-## 9. Conclusion
-
-Implementing a versioned, schema-driven dynamic UI rendering system is a strategic investment that addresses fundamental challenges in evolving software applications. It provides a robust framework for accurately representing historical data, improving data integrity, and enhancing the maintainability and scalability of the frontend. While requiring upfront effort, the long-term benefits in terms of development efficiency, user experience, and system adaptability are substantial.
-
----
-
-## Appendix A: Example Conditional Visibility (`x-ui-visible-if`) Operators
-
-The `x-ui-visible-if` rule typically specifies a `field` to watch and an operator/condition:
-
-* **Presence/Existence:**
-    * `isDefined: true/false`
-    * `isNull: true/false`
-    * `isEmpty: true/false` (for strings, arrays)
-    * `isNotEmpty: true/false` (for strings, arrays)
-* **Value Comparison:**
-    * `hasValue: <comparisonValue>` (strict equality for strings, numbers, booleans; for conditional evaluation, string data might be coerced to boolean if `hasValue` is boolean)
-    * `notHasValue: <comparisonValue>`
-* **String Operations:**
-    * `startsWith: "<prefix>"`
-    * `endsWith: "<suffix>"`
-    * `contains: "<substring>"`
-    * `matchesPattern: "<regexPattern>"`
-    * `minLength: <number>`
-    * `maxLength: <number>`
-* **Numeric Operations:**
-    * `greaterThan: <number>` (gt)
-    * `lessThan: <number>` (lt)
-    * `greaterThanOrEquals: <number>` (gte)
-    * `lessThanOrEquals: <number>` (lte)
-* **Array Operations:**
-    * `containsElement: <value>`
-    * `lengthEquals: <number>`
-    * `minItems: <number>`
-    * `maxItems: <number>`
-* **Date Operations** (requires date parsing & comparison context):
-    * `dateIsBefore: "<dateString>"`
-    * `dateIsAfter: "<dateString>"`
-* **Logical Combinators** (wrapping multiple condition objects):
-    * `allOf: [{condition1}, {condition2}]` (AND)
-    * `anyOf: [{condition1}, {condition2}]` (OR)
-    * `not: {condition}` (NOT)
-
-Each condition object within `allOf`/`anyOf`/`not` would specify its own `field`, operator, and `value`.
-
----
-## Appendix B: Example Schema Snippets (Illustrative)
-
-### B.1 Snippet: Simplified Schema for New Development (Focus on Structure & Basic Validation)
-```json
-// latest-plan-schema.json
+    User->>FrontendApp: Opens Plan X (schemaVersionId='v1.2.0') for Editing
+    FrontendApp->>FrontendApp: Compare Plan's 'v1.2.0' with Latest Schema Version (e.g., 'v2.0.0')
+    alt Plan Version is Outdated
+        FrontendApp->>User: Prompt: "Migrate plan to latest version (v2.0.0) to edit?"
+        User->>FrontendApp: Confirms Migration
+        FrontendApp->>BackendAPI: POST /api/migrate-plan (planData, fromVersion='v1.2.0', toVersion='v2.0.0')
+        BackendAPI->>SchemaRegistry: Load schema 'v1.2.0' (FromSchema)
+        SchemaRegistry-->>BackendAPI: fromSchema content
+        BackendAPI->>SchemaRegistry: Load schema 'v2.0.0' (ToSchema)
+        SchemaRegistry-->>BackendAPI: toSchema content
+        BackendAPI->>BackendAPI: Perform recursive data migration (based on FromSchema & ToSchema)
+        BackendAPI->>BackendAPI: Update schemaVersionId in migrated data to 'v2.0.0'
+        BackendAPI-->>FrontendApp: Migrated Plan Data (conforms to v2.0.0)
+        FrontendApp->>FrontendApp: Load migrated data into editor UI (now based on v2.0.0 schema)
+        User->>FrontendApp: Edits Plan
+        FrontendApp->>BackendAPI: PUT /api/plans/X (with migrated & edited data, schemaVersionId='v2.0.0')
+        BackendAPI->>Database: Save Updated Plan X
+    else Plan Version is Current
+        FrontendApp->>FrontendApp: Load plan data into editor UI (based on current schema)
+    end
+(To use this in Confluence, paste the Mermaid code into a "Mermaid Diagram" macro.)4.4. Considerations for Migration LogicData Loss: Be explicit about how data from fields removed in newer schemas is handled. Options: drop, archive, or attempt to map to other existing/new fields.Default Values: When new fields are added, define how their initial values are set (e.g., null, schema-defined default, or a calculated value).Complex Transformations: The provided Java code shows a direct mapping. More complex migrations might require custom transformation functions for specific fields (e.g., splitting a field, combining fields, changing data formats).Idempotency: Ideally, a migration script or process should be idempotent (running it multiple times on already migrated data doesn't cause adverse effects).Testing: Thoroughly test migration paths between all relevant schema versions.5. React Proof of Concept (Summary)A proof-of-concept (PoC) React application was developed to validate the feasibility and effectiveness of the schema-driven dynamic UI rendering approach.Core Components:App.js: The main application component, responsible for managing the overall state, including the current schema, data blob, and the selected rendering mode.SchemaField.js (or SchemaRenderer.js): A recursive React component designed to:Accept a schema node, the corresponding data node from the blob, the full data blob (for evaluating global conditions), and the current rendering mode as props.Interpret schema properties such as type, title, description, x-ui-order (for field ordering), element (for specific UI widget hints like rendering a string as a checkbox representation), and x-ui-visible-if (for conditional visibility).Handle nested object structures by recursively calling itself for sub-properties.Key Functionality Demonstrated:Two Rendering Modes:Simple Mode: Renders all UI elements defined in the schema, displaying "[N/A]" for any data not present in the blob. Conditional visibility rules are ignored.Conditional Mode: Actively evaluates x-ui-visible-if rules defined within the schema against the provided data blob. UI elements (fields or entire sections) are only rendered if their visibility conditions are met.Data Access & Evaluation:Implemented a getNestedValue(data, path) helper function to safely retrieve data from potentially deeply nested paths within the data blob, as specified in condition rules.Implemented an evaluateCondition(condition, fullData) helper function to parse and evaluate the logic defined in x-ui-visible-if objects. This included handling different operators like hasValue, isNotEmpty, etc.Flexible Data Display: The renderer demonstrated handling for different data types specified in the schema (e.g., displaying actual booleans as "Yes"/"No") and also adapted to cases where string data was used to represent boolean-like states (e.g., for checkboxes where a non-empty string means "checked").Learnings & Outcomes:The PoC successfully demonstrated that a generic rendering engine can accurately display complex, versioned data structures based on external schema definitions.Conditional visibility logic driven by schema hints is feasible and powerful.The importance of robust helper functions for data traversal and condition evaluation was highlighted.The PoC provides a solid foundation for building a production-ready rendering engine.(Consider linking to the PoC code repository or a more detailed PoC write-up if available.)6. Benefits of this ApproachAdopting a schema-driven dynamic UI with versioned schemas offers significant advantages:Accurate Historical Representation: Ensures users see an accurate reflection of data as it was structured and intended at any point in time.Improved Data Integrity: By validating new data against a clear schema contract, data quality is enhanced. For editable data, migration ensures conformity to the latest standards.Reduced Frontend Complexity: Eliminates the need to write and maintain version-specific UI rendering code for viewing. The editing UI always targets the latest schema.Maintainability & Scalability: Easier to manage changes. When a new data version is introduced, a new schema is created/updated. The rendering engine adapts, and migration logic handles transitions for editable data.Developer Productivity:Frontend developers can focus on building the generic rendering engine and reusable UI components.Backend developers have clear contracts (schemas) for data validation and migration paths.Clear separation of concerns.Centralized Business Rules (for Presentation & Structure): Schemas act as a central repository for how data should be structured and presented.Adaptability: The system can more easily adapt to future changes in data structure and UI requirements.7. Considerations and Trade-offsWhile powerful, this approach has considerations:Initial Setup Effort:Designing and implementing the dynamic UI rendering engine requires a significant upfront investment.Establishing a robust schema versioning and management process takes time and discipline.Developing and testing migration logic between schema versions can be complex.Performance of Dynamic Rendering: For extremely large and complex schemas or data blobs, the dynamic rendering process might introduce performance overhead. Careful optimization (e.g., memoization, virtualized lists for large arrays) may be needed.Complexity of Schema Management: As the number of schema versions grows, managing them effectively (storage, retrieval, diffing, deprecation) becomes crucial. A schema registry can be beneficial.Complexity of Migration Logic: As schemas diverge significantly, the logic to migrate data between versions can become highly complex and require careful handling of data transformations and potential data loss.Learning Curve: The team needs to become proficient in JSON Schema and the conventions used for UI hints and conditional logic, as well as understanding the migration framework.Tooling: Good tooling for creating, validating, managing JSON schemas, and testing migrations is important.Debugging: Debugging issues that span across the data, the schema, the rendering engine, and the migration logic can sometimes be more complex.8. Migration Strategy for Existing Data (Initial System Bootstrap - If Applicable)If you have existing plan data that was not created under any versioned schema approach (i.e., before this system was in place), an initial bootstrapping migration strategy will be needed:Analyze Existing Data Structures: Understand the different historical "shapes" of your existing plan data.Create Historical Schemas: For each distinct historical data structure identified, create a corresponding JSON schema (e.g., plan-schema-v0.1.0.json, plan-schema-v0.2.0.json). These schemas should accurately reflect the fields and types present at those times.Determine Schema Version for Existing Records:This is the most challenging part. You might need to use heuristics:Creation/Update Timestamps: If records have reliable timestamps, you might be able to map date ranges to specific schema versions (assuming you know when schema changes roughly occurred).Presence/Absence of Key Fields: Write scripts to inspect existing data records for the presence or absence of certain "marker" fields that indicate which historical structure they belong to.Default to a Base Schema: For very old or indeterminate records, you might assign them to a very basic historical schema.Update Data Records: Add the determined schemaVersionId to each existing plan data record. This might involve a one-time batch update to your database.Iterative Refinement: This process may be iterative. As you analyze data and build historical schemas, you might refine your understanding and schema definitions.9. Team Roles & Responsibilities (Suggested)Defining roles can help ensure the success of this system:Schema Architects/Stewards (e.g., Senior Developers, Tech Leads):Responsible for designing, versioning, and maintaining the JSON schemas.Define and document conventions for custom UI hints (e.g., x-ui-visible-if).Oversee the schema registry or storage solution.Design and oversee the data migration strategies between schema versions.Frontend Development Team:Develops and maintains the dynamic UI rendering engine.Implements generic UI components that can be configured by the schema.Ensures the engine correctly interprets schema directives.Implements the UI flows for user-initiated plan migration.Backend Development Team:Implements the flexible storage and retrieval of versioned plan data.Ensures the correct historical schema is fetched and provided to the frontend alongside the data for viewing.Develops and maintains the server-side /migrate-plan endpoint and the underlying migration logic.Develops and maintains server-side validation logic for new/updated data (both schema-based and complex business rule validation in code).Product Management/Business Analysts:Define the data requirements and conditional logic for different plan versions.Work with Schema Architects to translate these requirements into schema definitions and UI hints.Define the rules for data migration between versions (e.g., how to handle dropped fields, defaults for new fields).QA/Testing Team:Develop test cases for various schema versions and data scenarios.Verify that historical data is rendered correctly according to its schema.Test conditional visibility and requirement logic.Crucially, test all data migration paths thoroughly.10. ConclusionImplementing a versioned, schema-driven dynamic UI rendering system, coupled with a well-defined strategy for user-initiated data migration for editing, is a strategic investment that addresses fundamental challenges in evolving software applications. It provides a robust framework for accurately representing historical data, ensuring data consistency for editable records, improving data integrity, and enhancing the maintainability and scalability of the frontend. While requiring upfront effort, the long-term benefits in terms of development efficiency, user experience, and system adaptability are substantial.Appendix A: Example Conditional Visibility (x-ui-visible-if) OperatorsThe x-ui-visible-if rule typically specifies a field to watch and an operator/condition:Presence/Existence:isDefined: true/falseisNull: true/falseisEmpty: true/false (for strings, arrays)isNotEmpty: true/false (for strings, arrays)Value Comparison:hasValue: <comparisonValue> (strict equality for strings, numbers, booleans; for conditional evaluation, string data might be coerced to boolean if hasValue is boolean)notHasValue: <comparisonValue>String Operations:startsWith: "<prefix>"endsWith: "<suffix>"contains: "<substring>"matchesPattern: "<regexPattern>"minLength: <number>maxLength: <number>Numeric Operations:greaterThan: <number> (gt)lessThan: <number> (lt)greaterThanOrEquals: <number> (gte)lessThanOrEquals: <number> (lte)Array Operations:containsElement: <value>lengthEquals: <number>minItems: <number>maxItems: <number>Date Operations (requires date parsing & comparison context):dateIsBefore: "<dateString>"dateIsAfter: "<dateString>"Logical Combinators (wrapping multiple condition objects):allOf: [{condition1}, {condition2}] (AND)anyOf: [{condition1}, {condition2}] (OR)not: {condition} (NOT)Each condition object within allOf/anyOf/not would specify its own field, operator, and value.Appendix B: Example Schema Snippets (Illustrative)B.1 Snippet: Simplified Schema for New Development (Focus on Structure & Basic Validation)// latest-plan-schema.json
 {
   "type": "object",
   "title": "Plan Data (Current Version)",
@@ -373,9 +289,7 @@ Each condition object within `allOf`/`anyOf`/`not` would specify its own `field`
   },
   "required": ["planName", "planType", "isActive"]
 }
-
-B.2 Snippet: Hypothetical Historical Schema (Illustrating Encoded Conditional Requirement - More Complex)
-// historical-plan-schema-v1.2.json
+B.2 Snippet: Hypothetical Historical Schema (Illustrating Encoded Conditional Requirement - More Complex)// historical-plan-schema-v1.2.json
 {
   "type": "object",
   "title": "Plan Data (Version 1.2)",
@@ -389,3 +303,8 @@ B.2 Snippet: Hypothetical Historical Schema (Illustrating Encoded Conditional Re
   "if": {
     "properties": { "status": { "const": "Closed" } }
   },
+  "then": {
+    "required": ["planIdentifier", "status", "closureReason"]
+  }
+}
+
